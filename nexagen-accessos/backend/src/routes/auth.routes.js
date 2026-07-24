@@ -259,7 +259,11 @@ router.post('/login', async (req, res) => {
       expiresIn: process.env.JWT_EXPIRES_IN || '8h',
     });
 
-    res.json({ token, user: { id: user.id, name: user.name, email: user.email, roles, permissions } });
+    res.json({
+      token,
+      user: { id: user.id, name: user.name, email: user.email, roles, permissions },
+      mustChangePassword: user.must_change_password,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Login failed' });
@@ -286,6 +290,40 @@ router.get('/me', requireAuth, async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to load current user' });
+  }
+});
+
+router.post('/change-password', requireAuth, async (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+
+  if (typeof newPassword !== 'string' || newPassword.length < MIN_PASSWORD_LENGTH) {
+    return res
+      .status(400)
+      .json({ error: `Password must be at least ${MIN_PASSWORD_LENGTH} characters long` });
+  }
+
+  try {
+    const { rows } = await pool.query('SELECT * FROM users WHERE id = $1', [req.user.id]);
+    const user = rows[0];
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const match = await bcrypt.compare(currentPassword, user.password_hash);
+    if (!match) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    const hash = await bcrypt.hash(newPassword, 10);
+    await pool.query(
+      `UPDATE users SET password_hash = $1, must_change_password = false WHERE id = $2`,
+      [hash, user.id]
+    );
+
+    res.status(200).end();
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to change password' });
   }
 });
 
