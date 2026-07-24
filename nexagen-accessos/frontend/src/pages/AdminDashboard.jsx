@@ -508,7 +508,6 @@ function UsersTab() {
   const [users, status, refetchUsers] = useTabData(getUsers);
   const [allRoles, rolesStatus] = useTabData(getRoles);
   const [editingUser, setEditingUser] = useState(null);
-  const [showBulkImport, setShowBulkImport] = useState(false);
   const [showBulkCreate, setShowBulkCreate] = useState(false);
   const [query, setQuery] = useState('');
   const [roleFilter, setRoleFilter] = useState('all');
@@ -564,10 +563,6 @@ function UsersTab() {
           ))}
         </select>
 
-        {/* Two independent features, deliberately side by side: "Bulk
-            import" (Frontend Dev 1) reassigns roles on existing users from
-            a CSV; "Export users" (Frontend Dev 3) downloads the current
-            list. They don't depend on each other. */}
         <button
           type="button"
           onClick={() => setShowBulkCreate(true)}
@@ -575,14 +570,6 @@ function UsersTab() {
           className="ml-auto rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
         >
           Create users
-        </button>
-        <button
-          type="button"
-          onClick={() => setShowBulkImport(true)}
-          disabled={status !== 'ready' || rolesStatus !== 'ready'}
-          className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          Bulk import roles
         </button>
         <button
           onClick={handleExport}
@@ -664,27 +651,15 @@ function UsersTab() {
         />
       )}
 
-      {showBulkImport && (
-        <BulkImportModal
-          users={users}
-          allRoles={allRoles}
-          onClose={() => setShowBulkImport(false)}
-          onSaved={() => {
-            setShowBulkImport(false);
-            refetchUsers();
-          }}
-        />
-      )}
-
       {showBulkCreate && (
         <BulkCreateUsersModal
           allRoles={allRoles}
           onClose={() => setShowBulkCreate(false)}
           onSaved={() => {
-            // Deliberately NOT auto-closing the modal here (unlike
-            // BulkImportModal's onSaved) — the admin still needs to click
-            // "Download credentials" for the generated passwords before the
-            // modal goes away, since those are only ever shown once.
+            // Deliberately NOT auto-closing the modal here — the admin
+            // still needs to click "Download credentials" for the
+            // generated passwords before the modal goes away, since those
+            // are only ever shown once.
             refetchUsers();
           }}
         />
@@ -693,318 +668,12 @@ function UsersTab() {
   );
 }
 
-// --- Bulk import modal ------------------------------------------------------
-// Frontend-only: reuses the existing PUT /admin/users/:id/roles endpoint
-// (updateUserRoles, defined above) per-row instead of a dedicated bulk
-// endpoint — there isn't one in docs/api-contract.md. CSV format is
-// `email,roles` with a header row, roles semicolon-separated, e.g.:
-//   email,roles
-//   alice@nexagen.com,Manager;Auditor
-//   bob@nexagen.com,Employee
-//
-// NOTE: this reassigns roles on EXISTING users matched by email — it's a
-// different feature from rbac.routes.js's POST /admin/users/bulk-import
-// (which CREATES new user accounts from a CSV). The names sound similar
-// but they don't overlap: this modal never creates a user, and the backend
-// bulk-import endpoint isn't wired to any UI yet. Worth clarifying with
-// the team so "bulk import" doesn't mean two different things in standups.
-
-// Very small CSV split — good enough for the email,roles shape above.
-// Doesn't handle quoted commas; fine for this two-column format.
-function parseBulkImportCsv(csvText, allRoles) {
-  const roleByName = new Map(allRoles.map((r) => [r.name.toLowerCase(), r]));
-  const lines = csvText
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean);
-
-  if (lines.length === 0) return [];
-
-  const firstCols = lines[0].split(',').map((c) => c.trim().toLowerCase());
-  const dataLines = firstCols[0] === 'email' ? lines.slice(1) : lines;
-
-  return dataLines.map((line, i) => {
-    const [rawEmail = '', rawRoles = ''] = line.split(',');
-    const email = rawEmail.trim();
-    const roleNames = rawRoles
-      .split(';')
-      .map((r) => r.trim())
-      .filter(Boolean);
-
-    const roleIds = [];
-    const unknownRoles = [];
-    for (const name of roleNames) {
-      const role = roleByName.get(name.toLowerCase());
-      if (role) roleIds.push(role.id);
-      else unknownRoles.push(name);
-    }
-
-    return { line: i + 1, email, roleNames, roleIds, unknownRoles };
-  });
-}
-
-function BulkImportModal({ users, allRoles, onClose, onSaved }) {
-  const [csvText, setCsvText] = useState('');
-  const [fileName, setFileName] = useState(null);
-  const [fileError, setFileError] = useState(null);
-  const [dragActive, setDragActive] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-  const [results, setResults] = useState(null);
-  const [submitError, setSubmitError] = useState(null);
-
-  const userByEmail = new Map(users.map((u) => [u.email?.toLowerCase(), u]));
-
-  const parsedRows = parseBulkImportCsv(csvText, allRoles);
-  const preview = parsedRows.map((row) => {
-    // severity distinguishes rows that are structurally broken (no email
-    // to match on, or no matching user at all — nothing to fix without a
-    // different CSV) from rows that just have a role problem (fixable by
-    // editing the roles column or creating the role first). Used below to
-    // pick red vs amber row highlighting.
-    if (!row.email) {
-      return { ...row, valid: false, severity: 'error', message: 'Missing email.' };
-    }
-    const user = userByEmail.get(row.email.toLowerCase());
-    if (!user) {
-      return { ...row, valid: false, severity: 'error', message: 'No matching user.' };
-    }
-    if (row.roleNames.length === 0) {
-      return { ...row, valid: false, severity: 'warning', message: 'No roles listed.' };
-    }
-    if (row.unknownRoles.length > 0) {
-      return {
-        ...row,
-        valid: false,
-        severity: 'warning',
-        message: `Unknown role(s): ${row.unknownRoles.join(', ')}`,
-      };
-    }
-    return { ...row, valid: true, user };
-  });
-
-  const validRows = preview.filter((r) => r.valid);
-
-  function loadFile(file) {
-    setFileError(null);
-    setResults(null);
-    if (!file) return;
-    if (!file.name.toLowerCase().endsWith('.csv')) {
-      setFileError('Please upload a .csv file.');
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => {
-      setCsvText(String(reader.result ?? ''));
-      setFileName(file.name);
-    };
-    reader.onerror = () => {
-      setFileError("Couldn't read that file. Try again.");
-    };
-    reader.readAsText(file);
-  }
-
-  function handleDrop(e) {
-    e.preventDefault();
-    setDragActive(false);
-    loadFile(e.dataTransfer.files?.[0]);
-  }
-
-  async function handleSubmit() {
-    if (validRows.length === 0) return;
-    setSubmitting(true);
-    setSubmitError(null);
-    const outcomes = [];
-    for (const row of validRows) {
-      try {
-        await updateUserRoles(row.user.id, row.roleIds);
-        outcomes.push({ ...row, submitStatus: 'ok' });
-      } catch (err) {
-        outcomes.push({
-          ...row,
-          submitStatus: 'error',
-          submitMessage:
-            err.response?.status === 409
-              ? 'Skipped — overlapping sensitive permissions.'
-              : "Couldn't update roles.",
-        });
-      }
-    }
-    setSubmitting(false);
-    setResults(outcomes);
-    if (outcomes.every((o) => o.submitStatus === 'ok')) {
-      onSaved();
-    }
-  }
-
-  const invalidCount = preview.length - validRows.length;
-
-  // Sample matches this modal's actual CSV shape — header `email,roles`,
-  // multiple roles per user semicolon-separated (see parseBulkImportCsv
-  // above) — not a generic name/email/role layout, since that's not what
-  // this importer reads.
-  function downloadSampleCsv() {
-    const sample = [
-      'email,roles',
-      'jane.doe@nexagen.com,Manager',
-      'alex.kim@nexagen.com,Finance;Auditor',
-      'sam.osei@nexagen.com,Employee',
-    ].join('\n');
-    const blob = new Blob([sample], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'bulk-import-sample.csv';
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
-  }
-
-  return (
-    <div className="fixed inset-0 z-20 flex items-center justify-center bg-slate-900/40 px-4">
-      <div className="w-full max-w-lg rounded-lg bg-white p-5 shadow-lg">
-        <div className="flex items-start justify-between gap-3">
-          <h2 className="text-sm font-semibold text-slate-900">Bulk import roles</h2>
-          <button
-            type="button"
-            onClick={downloadSampleCsv}
-            className="whitespace-nowrap text-xs font-medium text-signal-600 hover:text-signal-700 hover:underline"
-          >
-            Download sample CSV
-          </button>
-        </div>
-        <p className="mt-1 text-xs text-slate-500">
-          Assign roles to multiple existing users from a CSV. Format:{' '}
-          <code className="rounded bg-slate-100 px-1 py-0.5">email,roles</code>{' '}
-          with roles separated by <code className="rounded bg-slate-100 px-1 py-0.5">;</code>
-        </p>
-
-        <label
-          onDragOver={(e) => {
-            e.preventDefault();
-            setDragActive(true);
-          }}
-          onDragLeave={() => setDragActive(false)}
-          onDrop={handleDrop}
-          className={`mt-4 block cursor-pointer rounded-lg border-2 border-dashed p-6 text-center text-sm transition-colors ${
-            dragActive
-              ? 'border-signal-400 bg-signal-50/60 text-signal-700'
-              : 'border-slate-300 text-slate-500 hover:bg-slate-50'
-          }`}
-        >
-          <input
-            type="file"
-            accept=".csv"
-            className="hidden"
-            onChange={(e) => loadFile(e.target.files?.[0])}
-          />
-          {fileName ? (
-            <span className="font-medium text-slate-700">Loaded: {fileName}</span>
-          ) : (
-            <span>Drop a .csv file here, or click to browse</span>
-          )}
-        </label>
-        {fileError && <p className="mt-1.5 text-xs text-rose-500">{fileError}</p>}
-
-        <label className="mt-3 block text-xs font-medium text-slate-600">
-          Or paste CSV
-          <textarea
-            value={csvText}
-            onChange={(e) => {
-              setCsvText(e.target.value);
-              setFileName(null);
-              setResults(null);
-            }}
-            rows={5}
-            placeholder={'email,roles\nalice@nexagen.com,Manager;Auditor'}
-            className="mt-1 w-full rounded-md border border-slate-300 px-2.5 py-1.5 font-mono text-xs"
-          />
-        </label>
-
-        {preview.length > 0 && (
-          <div className="mt-3 max-h-48 overflow-y-auto rounded-md border border-slate-200">
-            <table className="min-w-full divide-y divide-slate-100 text-xs">
-              <tbody className="divide-y divide-slate-100">
-                {preview.map((row) => {
-                  const outcome = results?.find((r) => r.line === row.line);
-                  // Row tint mirrors the badge tone so a skipped row is
-                  // visible at a glance while scanning, not just readable
-                  // one badge at a time: red for rows with nothing to
-                  // match on (missing email / no user), amber for rows
-                  // that parsed fine but have a role problem.
-                  const rowTint =
-                    row.severity === 'error'
-                      ? 'bg-rose-50/60'
-                      : row.severity === 'warning'
-                      ? 'bg-amber-50/50'
-                      : '';
-                  return (
-                    <tr key={row.line} className={rowTint}>
-                      <td className="px-2.5 py-1.5 text-slate-500">{row.line}</td>
-                      <td className="px-2.5 py-1.5 text-slate-700">{row.email || '—'}</td>
-                      <td className="px-2.5 py-1.5">
-                        {outcome ? (
-                          <StatusPill tone={outcome.submitStatus === 'ok' ? 'green' : 'red'}>
-                            {outcome.submitStatus === 'ok' ? 'Updated' : outcome.submitMessage}
-                          </StatusPill>
-                        ) : row.valid ? (
-                          <StatusPill tone="slate">{row.roleNames.join(', ')}</StatusPill>
-                        ) : (
-                          <StatusPill tone={row.severity === 'error' ? 'red' : 'amber'}>
-                            {row.message}
-                          </StatusPill>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        {preview.length > 0 && (
-          <p className="mt-2 text-xs text-slate-500">
-            {validRows.length} of {preview.length} row{preview.length === 1 ? '' : 's'} ready
-            {invalidCount > 0 && `, ${invalidCount} skipped`}.
-          </p>
-        )}
-
-        {submitError && <p className="mt-2 text-xs text-rose-500">{submitError}</p>}
-
-        <div className="mt-5 flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={submitting}
-            className="rounded-md px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 disabled:opacity-50"
-          >
-            {results ? 'Close' : 'Cancel'}
-          </button>
-          <button
-            type="button"
-            onClick={handleSubmit}
-            disabled={submitting || validRows.length === 0}
-            className="btn-primary btn-sm"
-          >
-            {submitting
-              ? 'Importing…'
-              : `Import ${validRows.length || ''} row${validRows.length === 1 ? '' : 's'}`}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // --- Bulk CREATE users modal -------------------------------------------------
-// Separate from BulkImportModal above: that one reassigns roles on users
-// that already exist (email,roles CSV). This one creates brand-new
-// accounts from a name,email,role CSV, backed by
+// Creates brand-new accounts from a name,email,role CSV, backed by
 // POST /admin/users/bulk-import (see rbac.routes.js).
 //
-// Very small CSV split, same caveat as parseBulkImportCsv above: doesn't
-// handle quoted commas, fine for this three-column shape.
+// Very small CSV split — doesn't handle quoted commas, fine for this
+// three-column shape.
 const EMAIL_RE_CLIENT = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function parseBulkCreateCsv(csvText) {
