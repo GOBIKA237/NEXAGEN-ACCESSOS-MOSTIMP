@@ -92,6 +92,13 @@ export default function Login() {
     if (rawUser && token) {
       try {
         const existingUser = JSON.parse(rawUser);
+        // A pending forced password change takes priority over the normal
+        // role redirect — otherwise someone who still owes a password
+        // change could skip it just by revisiting "/" with a live session.
+        if (sessionStorage.getItem('mustChangePassword') === 'true') {
+          navigate('/change-password');
+          return;
+        }
         navigate(existingUser?.roles?.includes('admin') ? '/admin' : '/dashboard');
         return;
       } catch (err) {
@@ -180,7 +187,7 @@ export default function Login() {
       // =========================
 
       if (isLogin) {
-        const { token, user } = await login(
+        const { token, user, mustChangePassword } = await login(
           form.email,
           form.password
         );
@@ -193,6 +200,16 @@ export default function Login() {
           'user',
           JSON.stringify(user)
         );
+
+        // Tracked alongside the token/user so a page reload (or revisiting
+        // "/" with a live session, see the effect above) still knows a
+        // change is owed — the JWT itself doesn't carry this.
+        if (mustChangePassword) {
+          sessionStorage.setItem('mustChangePassword', 'true');
+          navigate('/change-password');
+          return;
+        }
+        sessionStorage.removeItem('mustChangePassword');
 
         // Redirect based on role. Login response returns `roles` (an
         // array) per docs/api-contract.md, not a single `role` string.
