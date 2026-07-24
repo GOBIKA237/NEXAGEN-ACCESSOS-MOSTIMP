@@ -320,6 +320,16 @@ router.post('/change-password', requireAuth, async (req, res) => {
       [hash, user.id]
     );
 
+    // CLAUDE.md: "Every permission check and admin action gets written to
+    // audit_logs." This is self-service (the user changing their own
+    // password), so there's no target_user_id — same no-target shape used
+    // elsewhere for self/system actions (e.g. checkPermission.js).
+    await pool.query(
+      `INSERT INTO audit_logs (user_id, action, resource, ip_address)
+       VALUES ($1, $2, $3, $4)`,
+      [user.id, 'PASSWORD_CHANGED', 'auth', req.ip]
+    );
+
     res.status(200).end();
   } catch (err) {
     console.error(err);
