@@ -40,6 +40,15 @@ export async function register(name, email, password) {
 export function logout() {
   sessionStorage.removeItem('token');
   sessionStorage.removeItem('user');
+  sessionStorage.removeItem('mustChangePassword');
+}
+
+// POST /auth/change-password — requires the current password, clears
+// must_change_password server-side on success (see auth.routes.js). Empty
+// 200 response on success; validation/auth errors come back as
+// { error: message } for the caller to show.
+export async function changePassword(currentPassword, newPassword) {
+  await api.post('/auth/change-password', { currentPassword, newPassword });
 }
 
 // GET /auth/me — re-derives roles/permissions server-side on every call
