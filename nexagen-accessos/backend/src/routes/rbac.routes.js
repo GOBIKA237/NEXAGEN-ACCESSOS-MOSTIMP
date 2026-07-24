@@ -1,9 +1,26 @@
 import { Router } from 'express';
+import crypto from 'crypto';
+import bcrypt from 'bcrypt';
 import { pool } from '../config/db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { checkPermission } from '../middleware/checkPermission.js';
 
 const router = Router();
+
+// Same shape as auth.routes.js's EMAIL_RE — deliberately simple/permissive,
+// good enough to catch obviously malformed input without rejecting
+// valid-but-unusual addresses.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// Bulk-created accounts don't go through the /register form, so there's no
+// user-supplied password to hash. Each row gets its own random one-time
+// password instead — long enough to satisfy auth.routes.js's
+// MIN_PASSWORD_LENGTH (8) with plenty of room, and only ever returned once
+// in the bulk-import response (never stored or logged in plaintext) so the
+// admin can hand it to the new user to change on first login.
+function generateTempPassword() {
+  return crypto.randomBytes(9).toString('base64url'); // 12 chars, [A-Za-z0-9_-]
+}
 
 // Permissions worth flagging when 2+ of the roles being assigned to a user
 // all grant them. Ordinary overlap between roles is expected and fine (e.g.
@@ -132,6 +149,118 @@ router.put('/users/:id/roles', requireAuth, checkPermission('manage_users'), asy
   );
 
   res.json({ id: Number(id), roles: rows });
+});
+
+// POST /users/bulk-import — body { rows: [{ name, email, role }] }
+//
+// Creates brand-new user accounts from CSV rows, unlike PUT /users/:id/roles
+// above which only reassigns roles on users that already exist. The two
+// were previously conflated under the same "bulk import" name in the admin
+// UI even though only this one actually creates accounts — see
+// frontend/src/pages/AdminDashboard.jsx's BulkImportModal for the older,
+// roles-only feature this is meant to sit alongside.
+//
+// Each row is processed independently (its own transaction) so one bad row
+// — a duplicate email, an unknown role name — doesn't roll back the whole
+// batch. `role` is optional per row; rows that omit it fall back to the
+// 'employee' role, matching what /auth/register does for a normal signup.
+// Every created row gets a random one-time password (see
+// generateTempPassword above) returned ONCE in the response body — nothing
+// else in this codebase emails users, so the admin is expected to relay it
+// out of band and the new user changes it after first login.
+router.post('/users/bulk-import', requireAuth, checkPermission('manage_users'), async (req, res) => {
+  const { rows } = req.body;
+
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return res.status(400).json({ error: 'rows must be a non-empty array' });
+  }
+  if (rows.length > 500) {
+    return res.status(400).json({ error: 'Max 500 rows per import' });
+  }
+
+  const { rows: roleRows } = await pool.query('SELECT id, name FROM roles');
+  const roleByName = new Map(roleRows.map((r) => [r.name.toLowerCase(), r]));
+  const defaultRole = roleByName.get('employee');
+
+  const results = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const line = i + 1;
+    const raw = rows[i] ?? {};
+    const name = typeof raw.name === 'string' ? raw.name.trim() : '';
+    const email = typeof raw.email === 'string' ? raw.email.trim() : '';
+    const roleName = typeof raw.role === 'string' ? raw.role.trim() : '';
+
+    if (!name || !email) {
+      results.push({ line, email, status: 'error', message: 'Missing name or email.' });
+      continue;
+    }
+    if (!EMAIL_RE.test(email)) {
+      results.push({ line, email, status: 'error', message: 'Invalid email address.' });
+      continue;
+    }
+
+    let role = defaultRole;
+    if (roleName) {
+      role = roleByName.get(roleName.toLowerCase());
+      if (!role) {
+        results.push({ line, email, status: 'error', message: `Unknown role "${roleName}".` });
+        continue;
+      }
+    }
+    if (!role) {
+      // Only reachable if the 'employee' role itself has been renamed/deleted
+      // and a row didn't specify its own role — nothing sensible to fall
+      // back to.
+      results.push({ line, email, status: 'error', message: 'No role to assign and no default "employee" role found.' });
+      continue;
+    }
+
+    const tempPassword = generateTempPassword();
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const hash = await bcrypt.hash(tempPassword, 10);
+      const { rows: inserted } = await client.query(
+        `INSERT INTO users (name, email, password_hash, must_change_password) VALUES ($1, $2, $3, true)
+         RETURNING id, name, email`,
+        [name, email, hash]
+      );
+      const newUser = inserted[0];
+
+      await client.query(
+        'INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)',
+        [newUser.id, role.id]
+      );
+
+      await client.query('COMMIT');
+      results.push({
+        line,
+        email,
+        status: 'created',
+        userId: newUser.id,
+        role: role.name,
+        tempPassword,
+      });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      if (err.code === '23505') {
+        results.push({ line, email, status: 'error', message: 'Email already registered.' });
+      } else {
+        console.error('POST /users/bulk-import row error', err);
+        results.push({ line, email, status: 'error', message: 'Could not create user.' });
+      }
+    } finally {
+      client.release();
+    }
+  }
+
+  const createdCount = results.filter((r) => r.status === 'created').length;
+  res.status(207).json({
+    createdCount,
+    errorCount: results.length - createdCount,
+    results,
+  });
 });
 
 // PUT /users/:id/manager — body { managerId }
