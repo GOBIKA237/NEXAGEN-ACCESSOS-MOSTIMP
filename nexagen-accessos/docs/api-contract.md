@@ -26,6 +26,20 @@ Response 200: `[{ id, name, email, roles: [...] }]`
 Request: `{ roleIds: [1,2] }`
 Response 200: `{ id, roles: [...] }`
 
+### PUT /admin/users/:id/manager
+Request: `{ managerId }`
+Response 200: `{ id, name, email, department, status, manager_id }`
+Response 400: `{ error: "managerId is required" }` |
+  `{ error: "A user cannot be their own manager" }` |
+  `{ error: "managerId must belong to a user holding the manager role" }`
+Response 404: `{ error: "User not found" }`
+`managerId` must belong to a user currently holding the `manager` role
+(active `user_roles` row, not expired) or the request is rejected — see
+rbac.routes.js. Fills the gap noted in Request.routes.js: without this,
+`users.manager_id` stays NULL after registration and every access request
+sits at `PENDING_MANAGER` forever unless an admin skip-levels it via PUT
+`/admin/access-requests/:id`.
+
 ### GET /admin/roles
 ### POST /admin/roles          Request: `{ name, description }`
 ### PUT /admin/roles/:id       Request: `{ name?, description?, permissionIds? }`
@@ -45,13 +59,20 @@ Response 200: `[{ id, user: {...}, requestedRole: {...}, requestedAt }]`
 Request: `{ status: "approved" | "denied" }`
 Response 200: `{ id, status }`
 
-### GET /admin/audit-logs?limit=50&userId=
+### GET /admin/audit-logs?limit=50&page=1&userId=
 Response 200: `[{ id, user, action, resource, ipAddress, createdAt }]`
 
 ## Rules Engine / Alerts — Lead
 
-### GET /admin/alerts
+### GET /admin/alerts?minScore=50&page=1&limit=20
 Response 200: `[{ id, userId, riskScore, reason, createdAt }]`
+
+### POST /admin/alerts/:id/invalidate-session
+`:id` is the alert's `id` (the underlying `login_events` row), not a user id.
+Forces that user's current token(s) to stop passing `requireAuth` — see
+`tokens_invalid_before` in schema.sql (schema change, team notified).
+Response 200: `{ message, user: { id, name, email, tokensInvalidBefore } }`
+Response 404 if the alert id doesn't exist.
 
 ## Route protection
 Every route above except `/auth/*` uses:
