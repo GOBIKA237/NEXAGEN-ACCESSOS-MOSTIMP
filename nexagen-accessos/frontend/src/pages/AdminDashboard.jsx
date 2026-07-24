@@ -722,20 +722,26 @@ function BulkImportModal({ users, allRoles, onClose, onSaved }) {
 
   const parsedRows = parseBulkImportCsv(csvText, allRoles);
   const preview = parsedRows.map((row) => {
+    // severity distinguishes rows that are structurally broken (no email
+    // to match on, or no matching user at all — nothing to fix without a
+    // different CSV) from rows that just have a role problem (fixable by
+    // editing the roles column or creating the role first). Used below to
+    // pick red vs amber row highlighting.
     if (!row.email) {
-      return { ...row, valid: false, message: 'Missing email.' };
+      return { ...row, valid: false, severity: 'error', message: 'Missing email.' };
     }
     const user = userByEmail.get(row.email.toLowerCase());
     if (!user) {
-      return { ...row, valid: false, message: 'No matching user.' };
+      return { ...row, valid: false, severity: 'error', message: 'No matching user.' };
     }
     if (row.roleNames.length === 0) {
-      return { ...row, valid: false, message: 'No roles listed.' };
+      return { ...row, valid: false, severity: 'warning', message: 'No roles listed.' };
     }
     if (row.unknownRoles.length > 0) {
       return {
         ...row,
         valid: false,
+        severity: 'warning',
         message: `Unknown role(s): ${row.unknownRoles.join(', ')}`,
       };
     }
@@ -798,10 +804,41 @@ function BulkImportModal({ users, allRoles, onClose, onSaved }) {
 
   const invalidCount = preview.length - validRows.length;
 
+  // Sample matches this modal's actual CSV shape — header `email,roles`,
+  // multiple roles per user semicolon-separated (see parseBulkImportCsv
+  // above) — not a generic name/email/role layout, since that's not what
+  // this importer reads.
+  function downloadSampleCsv() {
+    const sample = [
+      'email,roles',
+      'jane.doe@nexagen.com,Manager',
+      'alex.kim@nexagen.com,Finance;Auditor',
+      'sam.osei@nexagen.com,Employee',
+    ].join('\n');
+    const blob = new Blob([sample], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'bulk-import-sample.csv';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <div className="fixed inset-0 z-20 flex items-center justify-center bg-slate-900/40 px-4">
       <div className="w-full max-w-lg rounded-lg bg-white p-5 shadow-lg">
-        <h2 className="text-sm font-semibold text-slate-900">Bulk import roles</h2>
+        <div className="flex items-start justify-between gap-3">
+          <h2 className="text-sm font-semibold text-slate-900">Bulk import roles</h2>
+          <button
+            type="button"
+            onClick={downloadSampleCsv}
+            className="whitespace-nowrap text-xs font-medium text-signal-600 hover:text-signal-700 hover:underline"
+          >
+            Download sample CSV
+          </button>
+        </div>
         <p className="mt-1 text-xs text-slate-500">
           Assign roles to multiple existing users from a CSV. Format:{' '}
           <code className="rounded bg-slate-100 px-1 py-0.5">email,roles</code>{' '}
@@ -856,8 +893,19 @@ function BulkImportModal({ users, allRoles, onClose, onSaved }) {
               <tbody className="divide-y divide-slate-100">
                 {preview.map((row) => {
                   const outcome = results?.find((r) => r.line === row.line);
+                  // Row tint mirrors the badge tone so a skipped row is
+                  // visible at a glance while scanning, not just readable
+                  // one badge at a time: red for rows with nothing to
+                  // match on (missing email / no user), amber for rows
+                  // that parsed fine but have a role problem.
+                  const rowTint =
+                    row.severity === 'error'
+                      ? 'bg-rose-50/60'
+                      : row.severity === 'warning'
+                      ? 'bg-amber-50/50'
+                      : '';
                   return (
-                    <tr key={row.line}>
+                    <tr key={row.line} className={rowTint}>
                       <td className="px-2.5 py-1.5 text-slate-500">{row.line}</td>
                       <td className="px-2.5 py-1.5 text-slate-700">{row.email || '—'}</td>
                       <td className="px-2.5 py-1.5">
@@ -868,7 +916,9 @@ function BulkImportModal({ users, allRoles, onClose, onSaved }) {
                         ) : row.valid ? (
                           <StatusPill tone="slate">{row.roleNames.join(', ')}</StatusPill>
                         ) : (
-                          <StatusPill tone="amber">{row.message}</StatusPill>
+                          <StatusPill tone={row.severity === 'error' ? 'red' : 'amber'}>
+                            {row.message}
+                          </StatusPill>
                         )}
                       </td>
                     </tr>
